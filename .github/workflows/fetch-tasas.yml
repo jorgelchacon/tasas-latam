@@ -1,0 +1,105 @@
+name: Fetch Tasas LATAM
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # cada hora en punto
+  workflow_dispatch:        # botón manual para correr cuando quieras
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch precios Binance P2P
+        run: |
+          fetch_p2p() {
+            local FIAT=$1
+            local TRADE=$2
+            curl -s -X POST "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search" \
+              -H "Content-Type: application/json" \
+              -d "{\"fiat\":\"$FIAT\",\"asset\":\"USDT\",\"tradeType\":\"$TRADE\",\"page\":1,\"rows\":10}"
+          }
+
+          VES=$(fetch_p2p VES SELL)
+          COP=$(fetch_p2p COP BUY)
+          ARS=$(fetch_p2p ARS BUY)
+          CLP=$(fetch_p2p CLP BUY)
+          MXN=$(fetch_p2p MXN BUY)
+          BRL=$(fetch_p2p BRL BUY)
+          PEN=$(fetch_p2p PEN BUY)
+          EUR=$(fetch_p2p EUR BUY)
+
+          avg() {
+            echo "$1" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          ads = (data.get('data') or [])[1:6]
+          prices = [float(a['adv']['price']) for a in ads if 'adv' in a]
+          print(sum(prices)/len(prices) if prices else 0)
+          "
+          }
+
+          VES_AVG=$(avg "$VES")
+          COP_AVG=$(avg "$COP")
+          ARS_AVG=$(avg "$ARS")
+          CLP_AVG=$(avg "$CLP")
+          MXN_AVG=$(avg "$MXN")
+          BRL_AVG=$(avg "$BRL")
+          PEN_AVG=$(avg "$PEN")
+          EUR_AVG=$(avg "$EUR")
+
+          FECHA=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          python3 -c "
+          import json
+          ves  = $VES_AVG
+          cop  = $COP_AVG
+          ars  = $ARS_AVG
+          clp  = $CLP_AVG
+          mxn  = $MXN_AVG
+          brl  = $BRL_AVG
+          pen  = $PEN_AVG
+          eur  = $EUR_AVG
+
+          def tasa(local, v):
+              return round(v / local, 6) if local else None
+
+          data = {
+              'fecha': '$FECHA',
+              'ves_usdt': round(ves, 4),
+              'tasas': {
+                  'USD': round(1 / ves, 8) if ves else None,
+                  'COP': tasa(cop, ves),
+                  'ARS': tasa(ars, ves),
+                  'CLP': tasa(clp, ves),
+                  'MXN': tasa(mxn, ves),
+                  'BRL': tasa(brl, ves),
+                  'PEN': tasa(pen, ves),
+                  'EUR': tasa(eur, ves),
+              },
+              'precios_usdt': {
+                  'VES': round(ves, 4),
+                  'COP': round(cop, 4),
+                  'ARS': round(ars, 4),
+                  'CLP': round(clp, 4),
+                  'MXN': round(mxn, 4),
+                  'BRL': round(brl, 4),
+                  'PEN': round(pen, 4),
+                  'EUR': round(eur, 4),
+              }
+          }
+          print(json.dumps(data, indent=2))
+          " > data/tasas.json
+
+      - name: Commit y push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/tasas.json
+          git diff --cached --quiet || git commit -m "chore: tasas $(date -u +'%Y-%m-%d %H:%M') UTC"
+          git push
