@@ -17,6 +17,7 @@ jobs:
 
       - name: Fetch precios Binance P2P
         run: |
+          mkdir -p data
           fetch_p2p() {
             local FIAT=$1
             local TRADE=$2
