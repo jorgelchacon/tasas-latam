@@ -36,6 +36,12 @@ _BCV_SSL_CTX = ssl.create_default_context()
 _BCV_SSL_CTX.check_hostname = False
 _BCV_SSL_CTX.verify_mode = ssl.CERT_NONE
 
+# El BCV publica su tasa una vez al día — a diferencia del paralelo (Binance),
+# no hace falta scrapearla cada hora. Solo se consulta cerca de las 5am y las
+# 6pm hora Venezuela (VET = UTC-4 fijo, sin horario de verano); el resto de
+# las corridas horarias conserva el último valor bueno sin tocar bcv.org.ve.
+HORAS_BCV_VE = {5, 18}
+
 # Venezuela se consulta del lado SELL (lo que piden por vender USDT) y el resto
 # del lado BUY, igual que hacía el workflow original.
 MERCADOS = {
@@ -181,10 +187,12 @@ def main():
     historial.append(punto_actual)
     historial = historial[-MAX_HISTORIAL:]
 
-    # Tasa oficial BCV: si bcv.org.ve no responde hoy, se conserva la última
-    # que sí se pudo leer (igual que el historial), en vez de dejar el campo
-    # vacío por una caída puntual del sitio del BCV.
-    bcv = bcv_oficial()
+    # Tasa oficial BCV: solo se scrapea dentro de la ventana horaria (~5am y
+    # ~6pm hora Venezuela); en el resto de las corridas, o si bcv.org.ve no
+    # responde, se conserva la última que sí se pudo leer (igual que el
+    # historial), en vez de dejar el campo vacío por una caída puntual.
+    hora_ve = (time.gmtime().tm_hour - 4) % 24
+    bcv = bcv_oficial() if hora_ve in HORAS_BCV_VE else None
     if bcv is None and os.path.exists(RUTA_SALIDA):
         try:
             with open(RUTA_SALIDA, "r", encoding="utf-8") as fh:
