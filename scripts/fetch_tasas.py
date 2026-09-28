@@ -15,6 +15,7 @@ conserva el último JSON bueno.
 import json
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -22,6 +23,18 @@ import urllib.request
 
 URL = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 BCV_URL = "https://www.bcv.org.ve/"
+
+# El servidor de bcv.org.ve manda la cadena de certificados incompleta (le
+# falta el intermedio). Los navegadores lo toleran porque suelen tener ese
+# intermedio cacheado, pero un runner limpio (como el de GitHub Actions) lo
+# rechaza con CERTIFICATE_VERIFY_FAILED. Es un problema conocido del sitio,
+# no nuestro. Decisión de Jorge (28-sep-2026): desactivar la verificación
+# SOLO para esta petición puntual — es una lectura pública, sin credenciales
+# ni datos sensibles de por medio. El resto del script sigue verificando TLS
+# normal (Binance no se toca).
+_BCV_SSL_CTX = ssl.create_default_context()
+_BCV_SSL_CTX.check_hostname = False
+_BCV_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # Venezuela se consulta del lado SELL (lo que piden por vender USDT) y el resto
 # del lado BUY, igual que hacía el workflow original.
@@ -89,7 +102,7 @@ def bcv_oficial():
         headers={"User-Agent": "tasas-latam/1.0 (+https://tasas.henkki.co)"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20, context=_BCV_SSL_CTX) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, TimeoutError) as e:
         print(f"BCV: sin respuesta ({e})", file=sys.stderr)
