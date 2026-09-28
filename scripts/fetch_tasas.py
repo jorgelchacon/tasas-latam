@@ -14,12 +14,14 @@ conserva el último JSON bueno.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 
 URL = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+BCV_URL = "https://www.bcv.org.ve/"
 
 # Venezuela se consulta del lado SELL (lo que piden por vender USDT) y el resto
 # del lado BUY, igual que hacía el workflow original.
@@ -78,6 +80,42 @@ def promedio(anuncios):
     return sum(precios) / len(precios) if precios else None
 
 
+def bcv_oficial():
+    """Tasa oficial de referencia del BCV (USD y EUR), leída del HTML público
+    de bcv.org.ve (sitio server-rendered, sin JS). Devuelve None si el sitio
+    no responde o cambia de maquetado, para no tumbar el resto del script."""
+    req = urllib.request.Request(
+        BCV_URL,
+        headers={"User-Agent": "tasas-latam/1.0 (+https://tasas.henkki.co)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError) as e:
+        print(f"BCV: sin respuesta ({e})", file=sys.stderr)
+        return None
+
+    def extraer(bloque_id):
+        m = re.search(
+            rf'id="{bloque_id}".*?<strong class="strong-tb">\s*([\d.,]+)\s*</strong>',
+            html, re.S,
+        )
+        # Formato BCV: coma decimal, punto de miles (si aparece).
+        return float(m.group(1).replace(".", "").replace(",", ".")) if m else None
+
+    usd = extraer("dolar")
+    eur = extraer("euro")
+    fecha_m = re.search(r'property="dc:date"[^>]*content="([^"]+)"', html)
+    fecha_valor = fecha_m.group(1) if fecha_m else None
+
+    if not usd or not eur:
+        print("BCV: no se pudo extraer USD/EUR del HTML (¿cambió el maquetado?)",
+              file=sys.stderr)
+        return None
+
+    return {"usd": round(usd, 4), "eur": round(eur, 4), "fecha_valor": fecha_valor}
+
+
 def main():
     precios = {}
     for fiat, trade_type in MERCADOS.items():
@@ -130,6 +168,17 @@ def main():
     historial.append(punto_actual)
     historial = historial[-MAX_HISTORIAL:]
 
+    # Tasa oficial BCV: si bcv.org.ve no responde hoy, se conserva la última
+    # que sí se pudo leer (igual que el historial), en vez de dejar el campo
+    # vacío por una caída puntual del sitio del BCV.
+    bcv = bcv_oficial()
+    if bcv is None and os.path.exists(RUTA_SALIDA):
+        try:
+            with open(RUTA_SALIDA, "r", encoding="utf-8") as fh:
+                bcv = json.load(fh).get("bcv")
+        except (json.JSONDecodeError, OSError):
+            bcv = None
+
     salida = {
         **punto_actual,
         # null en vez de 0 cuando un mercado no tiene ofertas, para que el
@@ -139,6 +188,7 @@ def main():
             for f, p in precios.items()
         },
         "historial": historial,
+        "bcv": bcv,
     }
 
     os.makedirs("data", exist_ok=True)
