@@ -12,6 +12,7 @@ de todas las tasas) el script sale con error sin tocar el archivo, y se
 conserva el último JSON bueno.
 """
 
+import calendar
 import json
 import os
 import re
@@ -37,10 +38,16 @@ _BCV_SSL_CTX.check_hostname = False
 _BCV_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # El BCV publica su tasa una vez al día — a diferencia del paralelo (Binance),
-# no hace falta scrapearla cada hora. Solo se consulta cerca de las 5am y las
-# 6pm hora Venezuela (VET = UTC-4 fijo, sin horario de verano); el resto de
-# las corridas horarias conserva el último valor bueno sin tocar bcv.org.ve.
-HORAS_BCV_VE = {5, 18}
+# no hace falta scrapearla cada hora. En vez de fijar una hora exacta (5am,
+# 6pm...), se vuelve a consultar solo si ya pasaron estas horas desde la
+# última vez que se consiguió un valor bueno. Nota (29-sep-2026): la primera
+# versión usaba un set de horas VE exactas, pero el cron de GitHub Actions
+# NO es puntual en repos de poco tráfico -- las corridas "cada hora" llegan a
+# atrasarse varias horas, así que la corrida casi nunca caía justo en esa
+# hora y el BCV se quedaba sin refrescar días enteros. Este enfoque por
+# tiempo transcurrido no depende de que ninguna corrida caiga en un minuto
+# exacto.
+BCV_INTERVALO_HORAS = 10
 
 # Venezuela se consulta del lado SELL (lo que piden por vender USDT) y el resto
 # del lado BUY, igual que hacía el workflow original.
@@ -97,6 +104,18 @@ def promedio(anuncios):
         return None
     precios = [float(a["adv"]["price"]) for a in anuncios[1:6] if "adv" in a]
     return sum(precios) / len(precios) if precios else None
+
+
+def horas_desde(iso_utc):
+    """Horas transcurridas desde un timestamp UTC 'YYYY-MM-DDTHH:MM:SSZ',
+    o None si no se pudo parsear. Usa calendar.timegm (no time.mktime) para
+    no depender del huso horario local del runner."""
+    try:
+        entonces = calendar.timegm(time.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+    ahora = calendar.timegm(time.gmtime())
+    return (ahora - entonces) / 3600
 
 
 def bcv_oficial():
@@ -187,18 +206,32 @@ def main():
     historial.append(punto_actual)
     historial = historial[-MAX_HISTORIAL:]
 
-    # Tasa oficial BCV: solo se scrapea dentro de la ventana horaria (~5am y
-    # ~6pm hora Venezuela); en el resto de las corridas, o si bcv.org.ve no
-    # responde, se conserva la última que sí se pudo leer (igual que el
-    # historial), en vez de dejar el campo vacío por una caída puntual.
-    hora_ve = (time.gmtime().tm_hour - 4) % 24
-    bcv = bcv_oficial() if hora_ve in HORAS_BCV_VE else None
-    if bcv is None and os.path.exists(RUTA_SALIDA):
+    # Tasa oficial BCV: se lee la que ya había en el JSON anterior y, salvo
+    # que ya haya pasado BCV_INTERVALO_HORAS desde que se consiguió (guardado
+    # en "fetched_at"), se deja tal cual -- sin tocar bcv.org.ve.
+    bcv_previo = None
+    if os.path.exists(RUTA_SALIDA):
         try:
             with open(RUTA_SALIDA, "r", encoding="utf-8") as fh:
-                bcv = json.load(fh).get("bcv")
+                bcv_previo = json.load(fh).get("bcv")
         except (json.JSONDecodeError, OSError):
-            bcv = None
+            bcv_previo = None
+
+    horas = horas_desde(bcv_previo["fetched_at"]) if bcv_previo and bcv_previo.get("fetched_at") else None
+    necesita_refresco = horas is None or horas >= BCV_INTERVALO_HORAS
+
+    bcv = None
+    if necesita_refresco:
+        bcv = bcv_oficial()
+        if bcv:
+            bcv["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        else:
+            print("BCV: refresco falló, se conserva el valor anterior", file=sys.stderr)
+    else:
+        print(f"BCV: última consulta hace {horas:.1f}h, todavía no toca refrescar")
+
+    if bcv is None:
+        bcv = bcv_previo
 
     salida = {
         **punto_actual,
